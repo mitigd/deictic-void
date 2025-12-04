@@ -1,4 +1,3 @@
-import React from 'react';
 import RelationalChain from './RelationalChain';
 
 export default function App() {

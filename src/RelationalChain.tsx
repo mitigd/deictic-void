@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
-  Play, Activity, BrainCircuit, Zap, Crosshair, 
-  RotateCw, Volume2, VolumeX, ShieldCheck, 
-  TrendingUp, TrendingDown, AlertTriangle, Cpu,
-  Compass, EyeOff, RotateCcw, Save, StopCircle, ArrowUp
+  BrainCircuit, Crosshair, 
+  TrendingUp, AlertTriangle, EyeOff, 
+  RotateCcw, Save, StopCircle, ArrowUp
 } from 'lucide-react';
 
 // --- TYPES & CONFIG ---
@@ -304,7 +303,7 @@ export default function VectorFrameUnbreakable() {
     const interval = setInterval(() => {
       setTimer(prev => {
         if (prev <= 0) {
-          handleFailure(true); 
+          handleFailure(); 
           return 0;
         }
         return prev - decay;
@@ -356,7 +355,7 @@ export default function VectorFrameUnbreakable() {
     }, 400);
   };
 
-  const handleFailure = (isTimeout: boolean) => {
+  const handleFailure = () => {
     playSound('fail', game.soundEnabled);
     const stabilityLoss = 30; 
     let newStability = game.stability - stabilityLoss;
@@ -376,11 +375,10 @@ export default function VectorFrameUnbreakable() {
     }
 
     setGame(prev => ({
-        ...prev, status: nextStatus === 'gameover' ? 'gameover' : 'success_anim',
+        ...prev, 
+        status: 'success_anim', // Pause input to show failure feedback
         multiplier: 1, streak: 0, stability: Math.max(0, newStability)
     }));
-
-    if (nextStatus === 'gameover') return;
 
     setTimeout(() => {
         setGame(prev => ({ ...prev, status: nextStatus, currentLevel: nextLevel, stability: newStability <= 0 ? 50 : newStability }));
@@ -398,7 +396,7 @@ export default function VectorFrameUnbreakable() {
         handleSuccess();
     } else {
         setFeedbackCell({ x, y, type: 'fail' });
-        handleFailure(false);
+        handleFailure();
     }
   };
 
