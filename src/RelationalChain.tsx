@@ -4,7 +4,7 @@ import {
   BrainCircuit, Crosshair, 
   TrendingUp, AlertTriangle, EyeOff, 
   RotateCcw, Save, StopCircle, ArrowUp,
-  Edit3, Lock, Unlock, BarChart2,
+  Edit3, Lock, Unlock, BarChart2, Target,
   Activity
 } from 'lucide-react';
 
@@ -507,8 +507,8 @@ export default function VectorFramePersistent() {
         stability: newStability, 
         streak: prev.streak + 1,
         multiplier: Math.min(prev.multiplier + 0.5, 5),
-        sessionCorrect: prev.sessionCorrect + 1,
-        sessionTotal: prev.sessionTotal + 1
+        sessionCorrect: game.isPracticeMode ? prev.sessionCorrect : prev.sessionCorrect + 1,
+        sessionTotal: game.isPracticeMode ? prev.sessionTotal : prev.sessionTotal + 1
     }));
 
     setTimeout(() => {
@@ -551,7 +551,7 @@ export default function VectorFramePersistent() {
         ...prev, 
         status: 'success_anim', 
         multiplier: 1, streak: 0, stability: newStability,
-        sessionTotal: prev.sessionTotal + 1
+        sessionTotal: game.isPracticeMode ? prev.sessionTotal : prev.sessionTotal + 1
     }));
 
     setTimeout(() => {
