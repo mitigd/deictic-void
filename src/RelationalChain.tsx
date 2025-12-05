@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   BrainCircuit, Crosshair, 
@@ -36,7 +36,7 @@ interface GameState {
 }
 
 const GRID_SIZE = 7; 
-const STORAGE_KEY = 'vector_frame_persistent_v3';
+const STORAGE_KEY = 'vector_frame_persistent_v4';
 
 const COLORS = {
   bg: '#050505',
@@ -55,58 +55,66 @@ const COLORS = {
 // --- SOUND ENGINE ---
 const playSound = (type: string, enabled: boolean) => {
     if (!enabled) return;
-    const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioContext) return;
-    const ctx = new AudioContext();
-    const now = ctx.currentTime;
-    
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
+    // AudioContext logic wrapped to prevent errors on some browsers/strict modes
+    try {
+        const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioContext) return;
+        const ctx = new AudioContext();
+        const now = ctx.currentTime;
+        
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
 
-    if (type === 'click') {
-        osc.frequency.setValueAtTime(800, now);
-        gain.gain.setValueAtTime(0.05, now);
-        gain.gain.linearRampToValueAtTime(0, now + 0.05);
-        osc.start(now);
-        osc.stop(now + 0.05);
-    } else if (type === 'success') {
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(400, now);
-        osc.frequency.exponentialRampToValueAtTime(800, now + 0.1);
-        gain.gain.setValueAtTime(0.1, now);
-        gain.gain.linearRampToValueAtTime(0, now + 0.3);
-        osc.start(now);
-        osc.stop(now + 0.3);
-    } else if (type === 'fail') {
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(150, now);
-        osc.frequency.linearRampToValueAtTime(50, now + 0.3);
-        gain.gain.setValueAtTime(0.1, now);
-        gain.gain.linearRampToValueAtTime(0, now + 0.3);
-        osc.start(now);
-        osc.stop(now + 0.3);
+        if (type === 'click') {
+            osc.frequency.setValueAtTime(800, now);
+            gain.gain.setValueAtTime(0.05, now);
+            gain.gain.linearRampToValueAtTime(0, now + 0.05);
+            osc.start(now);
+            osc.stop(now + 0.05);
+        } else if (type === 'success') {
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(400, now);
+            osc.frequency.exponentialRampToValueAtTime(800, now + 0.1);
+            gain.gain.setValueAtTime(0.1, now);
+            gain.gain.linearRampToValueAtTime(0, now + 0.3);
+            osc.start(now);
+            osc.stop(now + 0.3);
+        } else if (type === 'fail') {
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(150, now);
+            osc.frequency.linearRampToValueAtTime(50, now + 0.3);
+            gain.gain.setValueAtTime(0.1, now);
+            gain.gain.linearRampToValueAtTime(0, now + 0.3);
+            osc.start(now);
+            osc.stop(now + 0.3);
+        }
+    } catch (e) {
+        // Fallback or silence
     }
 };
 
 // --- LOGIC ENGINE ---
 
+// FIX 1: Robust Modulo for Negative Rotations
+const safeMod = (n: number, m: number) => ((n % m) + m) % m;
+
 const getVector = (rotation: number, dir: Direction): { dx: number, dy: number } => {
-  // RELATIVE LOGIC: 0=Up, 90=Right, 180=Down, 270=Left
-  let angleOffset = 0;
-  
-  // Absolute override
+  // Absolute overrides
   if (dir === 'NORTH') return { dx: 0, dy: -1 };
   if (dir === 'SOUTH') return { dx: 0, dy: 1 };
   if (dir === 'EAST') return { dx: 1, dy: 0 };
   if (dir === 'WEST') return { dx: -1, dy: 0 };
 
+  // Relative logic
+  let angleOffset = 0;
   if (dir === 'RIGHT') angleOffset = 90;
   if (dir === 'BACK') angleOffset = 180;
   if (dir === 'LEFT') angleOffset = 270;
 
-  const finalAngle = (rotation + angleOffset) % 360;
+  // Use safeMod to prevent -90 bugs
+  const finalAngle = safeMod(rotation + angleOffset, 360);
   
   if (finalAngle === 0) return { dx: 0, dy: -1 };
   if (finalAngle === 90) return { dx: 1, dy: 0 };
@@ -128,7 +136,6 @@ const getOpposite = (dir: Direction): Direction => {
 };
 
 export default function VectorFrameUnbreakable() {
-  // --- STATE ---
   const [game, setGame] = useState<GameState>({ 
     status: 'idle', 
     currentLevel: 1, 
@@ -149,8 +156,6 @@ export default function VectorFrameUnbreakable() {
   const [feedbackCell, setFeedbackCell] = useState<{x: number, y: number, type: 'success' | 'fail'} | null>(null);
 
   // --- PERSISTENCE ---
-  
-  // 1. Load on Mount
   useEffect(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -169,7 +174,6 @@ export default function VectorFrameUnbreakable() {
     }
   }, []);
 
-  // 2. Save on Change (Auto-save)
   useEffect(() => {
     if (game.status !== 'idle') {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -183,26 +187,33 @@ export default function VectorFrameUnbreakable() {
 
   // --- ALGORITHM ---
   const generateLevel = useCallback((level: number) => {
+    // Difficulty Scaling
     const chainLength = level < 5 ? 1 : (level < 10 ? 2 : (level < 15 ? 3 : 4));
-    
     const allowInversion = level >= 4;
     const allowAbsolute = level >= 7;
     const allowInterference = level >= 12;
 
     let valid = false;
     let newAnchor, newRot, newChain, finalX, finalY;
-
-    // Safety break
     let attempts = 0;
+    
+    // Safety Limit: 500 attempts before hard failsafe
+    const MAX_ATTEMPTS = 500;
 
-    while (!valid && attempts < 100) {
+    while (!valid && attempts < MAX_ATTEMPTS) {
       attempts++;
-      newAnchor = {
-        x: Math.floor(Math.random() * GRID_SIZE),
-        y: Math.floor(Math.random() * GRID_SIZE)
-      };
-      newRot = Math.floor(Math.random() * 4) * 90;
       
+      // FIX 2: CENTER BIAS TO PREVENT OOB
+      // Level 1-3: No bias. Level 4-9: Inner 5x5. Level 10+: Inner 3x3.
+      const padding = chainLength > 1 ? (chainLength > 3 ? 2 : 1) : 0;
+      const safeSize = GRID_SIZE - (padding * 2);
+
+      newAnchor = {
+        x: Math.floor(Math.random() * safeSize) + padding,
+        y: Math.floor(Math.random() * safeSize) + padding
+      };
+      
+      newRot = Math.floor(Math.random() * 4) * 90;
       newChain = [];
       let currentX = newAnchor.x;
       let currentY = newAnchor.y;
@@ -242,8 +253,10 @@ export default function VectorFrameUnbreakable() {
             displayColor
         });
 
+        // BOUNDS CHECK - Stop immediately if OOB
         if (currentX < 0 || currentX >= GRID_SIZE || currentY < 0 || currentY >= GRID_SIZE) {
-          pathFailed = true; break;
+          pathFailed = true; 
+          break;
         }
       }
 
@@ -252,6 +265,23 @@ export default function VectorFrameUnbreakable() {
         finalX = currentX;
         finalY = currentY;
       }
+    }
+
+    // FIX 3: HARD FAILSAFE
+    // If random gen fails 500 times, inject a dead-simple level so the game doesn't break
+    if (!valid) {
+        console.warn("Generation Failsafe Triggered");
+        newAnchor = { x: 3, y: 3 };
+        newRot = 0;
+        finalX = 3; 
+        finalY = 2; // North
+        newChain = [{ 
+            dir: 'NORTH', 
+            frame: 'ABSOLUTE', 
+            protocol: 'DIRECT', 
+            id: 'failsafe', 
+            displayColor: COLORS.direct 
+        }];
     }
 
     setAnchorPos(newAnchor!);
@@ -264,15 +294,14 @@ export default function VectorFrameUnbreakable() {
 
   const startGame = () => {
     playSound('click', game.soundEnabled);
+    generateLevel(game.currentLevel); // Generate first
     setGame(prev => ({ 
         ...prev, 
         status: 'playing', 
-        // We do NOT reset level/score here, allowing continuation
         multiplier: 1, 
         streak: 0, 
         history: []
     }));
-    generateLevel(game.currentLevel);
   };
 
   const resetProgress = () => {
@@ -280,7 +309,7 @@ export default function VectorFrameUnbreakable() {
       if (window.confirm("Reset all training progress to Level 1?")) {
         const newState = {
             currentLevel: 1,
-            maxLevel: game.maxLevel, // We keep the record high
+            maxLevel: game.maxLevel,
             stability: 50,
             score: 0
         };
@@ -291,10 +320,20 @@ export default function VectorFrameUnbreakable() {
 
   const stopGame = () => {
       playSound('click', game.soundEnabled);
-      setGame(prev => ({ ...prev, status: 'gameover' })); // Shows summary screen
+      setGame(prev => ({ ...prev, status: 'gameover' }));
   };
 
   // --- GAME LOOP ---
+  // We use a ref to track if we've handled the timeout to prevent double-firing
+  const failureHandled = useRef(false);
+
+  useEffect(() => {
+    // Reset the failure lock whenever we start playing
+    if (game.status === 'playing') {
+        failureHandled.current = false;
+    }
+  }, [game.status]);
+
   useEffect(() => {
     if (game.status !== 'playing') return;
     
@@ -303,7 +342,11 @@ export default function VectorFrameUnbreakable() {
     const interval = setInterval(() => {
       setTimer(prev => {
         if (prev <= 0) {
-          handleFailure(); 
+          // Guard clause to prevent race conditions
+          if (!failureHandled.current) {
+             failureHandled.current = true;
+             handleFailure(); 
+          }
           return 0;
         }
         return prev - decay;
@@ -335,22 +378,28 @@ export default function VectorFrameUnbreakable() {
         ...prev, 
         status: 'success_anim', 
         score: Math.floor(prev.score + points),
-        currentLevel: nextLevel, 
-        maxLevel: Math.max(prev.maxLevel, nextLevel),
         stability: newStability, 
         streak: prev.streak + 1,
         multiplier: Math.min(prev.multiplier + 0.5, 5)
     }));
 
     setTimeout(() => {
-        setGame(prev => ({ ...prev, status: nextStatus === 'level_up' ? 'level_up' : 'playing' }));
+        // FIX 4: ORDER OF OPERATIONS - Generate Level BEFORE playing
         if (nextStatus === 'level_up') {
+            setGame(prev => ({ ...prev, status: 'level_up', currentLevel: nextLevel, maxLevel: Math.max(prev.maxLevel, nextLevel) }));
             setTimeout(() => {
-                setGame(prev => ({ ...prev, status: 'playing' }));
                 generateLevel(nextLevel);
+                // Short delay to ensure state propagates
+                requestAnimationFrame(() => {
+                    setGame(prev => ({ ...prev, status: 'playing' }));
+                });
             }, 1200);
         } else {
             generateLevel(nextLevel);
+            // Short delay
+            requestAnimationFrame(() => {
+                setGame(prev => ({ ...prev, status: 'playing', currentLevel: nextLevel, maxLevel: Math.max(prev.maxLevel, nextLevel) }));
+            });
         }
     }, 400);
   };
@@ -369,23 +418,36 @@ export default function VectorFrameUnbreakable() {
             newStability = 50;
             nextStatus = 'level_down';
         } else {
-            // Level 1 failure shouldn't kill the session, just reset stability
             newStability = 20; 
         }
     }
 
     setGame(prev => ({
         ...prev, 
-        status: 'success_anim', // Pause input to show failure feedback
+        status: 'success_anim', // Pauses timer effect
         multiplier: 1, streak: 0, stability: Math.max(0, newStability)
     }));
 
     setTimeout(() => {
-        setGame(prev => ({ ...prev, status: nextStatus, currentLevel: nextLevel, stability: newStability <= 0 ? 50 : newStability }));
-        setTimeout(() => {
-            setGame(prev => ({ ...prev, status: 'playing' }));
+        // FIX 4: ORDER OF OPERATIONS
+        // 1. Show intermediate status (level down) if needed
+        if (nextStatus === 'level_down') {
+            setGame(prev => ({ ...prev, status: 'level_down', currentLevel: nextLevel }));
+            setTimeout(() => {
+                // 2. Generate data for new level (resets timer to 100)
+                generateLevel(nextLevel);
+                // 3. Start Playing
+                requestAnimationFrame(() => {
+                   setGame(prev => ({ ...prev, status: 'playing', stability: 50 }));
+                });
+            }, 1200);
+        } else {
+            // Immediate restart
             generateLevel(nextLevel);
-        }, nextStatus === 'level_down' ? 1200 : 200);
+            requestAnimationFrame(() => {
+                setGame(prev => ({ ...prev, status: 'playing', currentLevel: nextLevel, stability: newStability <= 0 ? 50 : newStability }));
+            });
+        }
     }, 500);
   };
 
@@ -410,7 +472,6 @@ export default function VectorFrameUnbreakable() {
       display: 'flex', flexDirection: 'column' as const, alignItems: 'center', justifyContent: 'center',
       userSelect: 'none' as const, position: 'relative' as const, overflow: 'hidden'
     },
-    // Grid container with forced aspect ratio and equal rows/cols
     grid: {
       display: 'grid', 
       gridTemplateColumns: `repeat(${GRID_SIZE}, 1fr)`, 
@@ -418,7 +479,7 @@ export default function VectorFrameUnbreakable() {
       gap: '6px', 
       width: '100%', 
       maxWidth: '440px', 
-      aspectRatio: '1/1', // Crucial for squareness
+      aspectRatio: '1/1', 
       padding: '10px',
       background: 'rgba(255,255,255,0.02)', 
       borderRadius: '12px', 
@@ -432,7 +493,7 @@ export default function VectorFrameUnbreakable() {
       cursor: 'pointer',
       display: 'flex', alignItems: 'center', justifyContent: 'center', 
       position: 'relative' as const,
-      width: '100%', height: '100%' // Fill the grid track
+      width: '100%', height: '100%' 
     },
     overlay: {
         position: 'absolute' as const, inset: 0, background: 'rgba(0,0,0,0.92)',
@@ -472,7 +533,6 @@ export default function VectorFrameUnbreakable() {
               />
           </div>
           
-          {/* STOP BUTTON */}
            <button 
               onClick={stopGame}
               title="End Session (Saves Progress)"
@@ -487,7 +547,6 @@ export default function VectorFrameUnbreakable() {
               <StopCircle size={16} />
            </button>
 
-          {/* RESET BUTTON */}
           <button 
               onClick={resetProgress}
               title="Reset Level"
@@ -516,7 +575,7 @@ export default function VectorFrameUnbreakable() {
                         width: '70px', height: '90px',
                         borderRadius: '6px',
                         background: '#0a0a0a',
-                        borderTop: `2px solid ${step.displayColor}`, // Stroop Color
+                        borderTop: `2px solid ${step.displayColor}`, 
                         borderBottom: '1px solid #222',
                         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
                         position: 'relative', overflow: 'hidden'
@@ -585,7 +644,7 @@ export default function VectorFrameUnbreakable() {
                             <ArrowUp size={36} color={COLORS.anchor} fill={COLORS.anchor} style={{ filter: 'drop-shadow(0 0 8px rgba(0,204,255,0.5))' }} />
                         </motion.div>
                     )}
-                    {/* Compass marks for Absolute Orientation aid */}
+                    {/* Compass marks */}
                     {game.currentLevel >= 7 && (
                         <div style={{position:'absolute', inset: 2, pointerEvents:'none', opacity: 0.1}}>
                             {x===GRID_SIZE-1 && y===0 && <div style={{width: 4, height: 4, background: COLORS.absolute, borderRadius: '50%'}}/>}
@@ -635,6 +694,14 @@ export default function VectorFrameUnbreakable() {
                 <TrendingUp size={64} color={COLORS.direct} />
                 <h2 style={{color: '#fff', marginTop: 24}}>LEVEL {game.currentLevel}</h2>
                 <div style={{color: COLORS.direct, fontSize: '12px', letterSpacing: '2px'}}>NEURAL PLASTICITY INCREASED</div>
+            </motion.div>
+        )}
+
+        {game.status === 'level_down' && (
+            <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} style={{...styles.overlay, background: 'rgba(0,0,0,0.8)'}}>
+                <AlertTriangle size={64} color={COLORS.inverted} />
+                <h2 style={{color: '#fff', marginTop: 24}}>LEVEL {game.currentLevel}</h2>
+                <div style={{color: COLORS.inverted, fontSize: '12px', letterSpacing: '2px'}}>STABILITY CRITICAL</div>
             </motion.div>
         )}
 
