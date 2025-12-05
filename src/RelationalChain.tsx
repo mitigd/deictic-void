@@ -2,9 +2,10 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   BrainCircuit, Crosshair, 
-  AlertTriangle, EyeOff, 
-  RotateCcw, StopCircle, ArrowUp,
-  Edit3, Lock, Unlock, Save
+  TrendingUp, AlertTriangle, EyeOff, 
+  RotateCcw, Save, StopCircle, ArrowUp,
+  Edit3, Lock, Unlock, BarChart2, Target,
+  Activity
 } from 'lucide-react';
 
 // --- TYPES & CONFIG ---
@@ -24,17 +25,30 @@ interface CommandStep {
   displayColor: string; 
 }
 
+interface MetricData {
+    attempts: number;
+    failures: number;
+}
+
+interface AnalyticsState {
+    tags: Record<string, MetricData>; 
+    sessions: { timestamp: number; maxLevel: number; score: number }[];
+}
+
 interface GameState {
-  status: 'idle' | 'playing' | 'gameover' | 'level_up' | 'level_down' | 'success_anim';
+  status: 'idle' | 'playing' | 'gameover' | 'level_up' | 'level_down' | 'success_anim' | 'analytics';
   currentLevel: number;
-  stability: number; // 0 to 100
+  stability: number; 
   maxLevel: number;
   score: number;
   multiplier: number;
   streak: number;
   soundEnabled: boolean;
-  isPracticeMode: boolean; 
-  history: { level: number; result: 'win' | 'loss' }[];
+  isPracticeMode: boolean;
+  analytics: AnalyticsState;
+  // Stats for HUD
+  sessionCorrect: number;
+  sessionTotal: number;
 }
 
 const GRID_SIZE = 7; 
@@ -44,25 +58,23 @@ const PERMANENT_KEY = 'rft_trainer_universal_save_v3';
 const LEGACY_KEYS = [
     'rft_trainer_universal_save_v2',
     'rft_trainer_universal_save',
-    'vector_frame_persistent_v4', 
-    'vector_frame_persistent_v3'
+    'vector_frame_persistent_v4'
 ];
 
 const COLORS = {
   bg: '#050505',
-  gridBorder: '#333',
-  cellBg: '#111',
-  anchor: '#00ccff', // Cyan (Player)
-  direct: '#00ff9d', // Green (True)
-  inverted: '#ff3366', // Red (False)
-  absolute: '#bd00ff', // Purple (Cardinal)
+  gridBorder: '#222',
+  cellBg: '#0a0a0a',
+  anchor: '#00ccff', 
+  direct: '#00ff9d', 
+  inverted: '#ff3366', 
+  absolute: '#bd00ff', 
   text: '#eeeeee',
-  muted: '#666',
+  muted: '#555555',
   warning: '#ffaa00',
   white: '#ffffff',
-  practice: '#ffd700', // Gold
-  buttonBg: '#222',
-  buttonHover: '#333'
+  practice: '#ffd700',
+  chartBar: '#333'
 };
 
 // --- SOUND ENGINE ---
@@ -102,14 +114,14 @@ const playSound = (type: string, enabled: boolean) => {
             osc.start(now);
             osc.stop(now + 0.3);
         } else if (type === 'lock') {
-            osc.frequency.setValueAtTime(300, now);
+            osc.frequency.setValueAtTime(200, now);
             osc.type = 'square';
             gain.gain.setValueAtTime(0.05, now);
             gain.gain.linearRampToValueAtTime(0, now + 0.1);
             osc.start(now);
             osc.stop(now + 0.1);
         }
-    } catch (e) { /* ignore */ }
+    } catch (e) { }
 };
 
 // --- LOGIC ENGINE ---
@@ -148,7 +160,7 @@ const getOpposite = (dir: Direction): Direction => {
   return 'LEFT'; 
 };
 
-export default function VectorFrameFixed() {
+export default function VectorFramePersistent() {
   const [game, setGame] = useState<GameState>({ 
     status: 'idle', 
     currentLevel: 1, 
@@ -159,7 +171,9 @@ export default function VectorFrameFixed() {
     streak: 0,
     soundEnabled: true,
     isPracticeMode: false,
-    history: []
+    analytics: { tags: {}, sessions: [] },
+    sessionCorrect: 0,
+    sessionTotal: 0
   });
   
   const [timer, setTimer] = useState(100);
@@ -170,20 +184,29 @@ export default function VectorFrameFixed() {
   const [feedbackCell, setFeedbackCell] = useState<{x: number, y: number, type: 'success' | 'fail'} | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
 
-  // --- PERSISTENCE ---
+  // --- PERSISTENCE & MIGRATION ---
   useEffect(() => {
     try {
       let saved = localStorage.getItem(PERMANENT_KEY);
+      
       if (!saved) {
           for (const key of LEGACY_KEYS) {
               const legacyData = localStorage.getItem(key);
               if (legacyData) {
-                  saved = legacyData;
-                  localStorage.setItem(PERMANENT_KEY, legacyData); 
+                  const parsed = JSON.parse(legacyData);
+                  const migratedState = {
+                      ...parsed,
+                      analytics: parsed.analytics || { tags: {}, sessions: [] },
+                      sessionCorrect: 0,
+                      sessionTotal: 0
+                  };
+                  saved = JSON.stringify(migratedState);
+                  localStorage.setItem(PERMANENT_KEY, saved); 
                   break; 
               }
           }
       }
+
       if (saved) {
         const data = JSON.parse(saved);
         setGame(prev => ({ 
@@ -191,12 +214,13 @@ export default function VectorFrameFixed() {
           currentLevel: data.currentLevel || 1,
           maxLevel: data.maxLevel || 1,
           stability: data.stability !== undefined ? data.stability : 50,
-          score: data.score || 0
+          score: data.score || 0,
+          analytics: data.analytics || { tags: {}, sessions: [] }
         }));
       }
       setIsLoaded(true);
     } catch (e) {
-      console.error(e);
+      console.error("Failed to load save", e);
       setIsLoaded(true);
     }
   }, []);
@@ -207,10 +231,61 @@ export default function VectorFrameFixed() {
         currentLevel: game.currentLevel,
         maxLevel: game.maxLevel,
         stability: game.stability,
-        score: game.score
+        score: game.score,
+        analytics: game.analytics
       }));
     }
-  }, [game.currentLevel, game.maxLevel, game.stability, game.score, game.status, isLoaded]);
+  }, [game, isLoaded]);
+
+  // --- ANALYTICS ENGINE ---
+  const updateAnalytics = (result: 'win' | 'loss') => {
+      // Don't track deep analytics in practice mode to avoid polluting data
+      if (game.isPracticeMode) return;
+
+      setGame(prev => {
+          const newTags = { ...prev.analytics.tags };
+          
+          chain.forEach(step => {
+              const protoKey = step.protocol;
+              if (!newTags[protoKey]) newTags[protoKey] = { attempts: 0, failures: 0 };
+              newTags[protoKey].attempts++;
+              if (result === 'loss') newTags[protoKey].failures++;
+
+              const frameKey = step.frame;
+              if (!newTags[frameKey]) newTags[frameKey] = { attempts: 0, failures: 0 };
+              newTags[frameKey].attempts++;
+              if (result === 'loss') newTags[frameKey].failures++;
+
+              const complexKey = `${step.protocol} ${step.dir}`;
+              if (!newTags[complexKey]) newTags[complexKey] = { attempts: 0, failures: 0 };
+              newTags[complexKey].attempts++;
+              if (result === 'loss') newTags[complexKey].failures++;
+          });
+
+          return {
+              ...prev,
+              analytics: {
+                  ...prev.analytics,
+                  tags: newTags
+              }
+          };
+      });
+  };
+
+  const recordSession = () => {
+      if (game.score > 100 && !game.isPracticeMode) {
+          setGame(prev => ({
+              ...prev,
+              analytics: {
+                  ...prev.analytics,
+                  sessions: [
+                      ...prev.analytics.sessions, 
+                      { timestamp: Date.now(), maxLevel: prev.currentLevel, score: prev.score }
+                  ]
+              }
+          }));
+      }
+  };
 
   // --- ALGORITHM ---
   const generateLevel = useCallback((level: number) => {
@@ -220,17 +295,12 @@ export default function VectorFrameFixed() {
     const allowInterference = level >= 12;
 
     let valid = false;
-    let newAnchor, newRot, finalX, finalY;
-    
-    // Explicitly typed array
-    let newChain: CommandStep[] = [];
-    
+    let newAnchor, newRot, newChain, finalX, finalY;
     let attempts = 0;
     const MAX_ATTEMPTS = 500;
 
     while (!valid && attempts < MAX_ATTEMPTS) {
       attempts++;
-      
       const padding = chainLength > 1 ? (chainLength > 3 ? 2 : 1) : 0;
       const safeSize = GRID_SIZE - (padding * 2);
 
@@ -291,12 +361,12 @@ export default function VectorFrameFixed() {
       }
     }
 
+    // FIX: TypeScript assignability for string literals
     if (!valid) {
         newAnchor = { x: 3, y: 3 };
         newRot = 0;
         finalX = 3; 
         finalY = 2;
-        // Explicitly typed failsafe
         newChain = [{ 
             dir: 'NORTH' as Direction, 
             frame: 'ABSOLUTE' as FrameType, 
@@ -322,7 +392,9 @@ export default function VectorFrameFixed() {
         status: 'playing', 
         multiplier: 1, 
         streak: 0, 
-        history: []
+        history: [],
+        sessionCorrect: 0,
+        sessionTotal: 0
     }));
   };
 
@@ -331,12 +403,11 @@ export default function VectorFrameFixed() {
       if (input) {
           const lvl = parseInt(input);
           if (!isNaN(lvl) && lvl > 0 && lvl < 100) {
-              setGame(prev => ({ ...prev, currentLevel: lvl, maxLevel: Math.max(prev.maxLevel, lvl), score: 0 }));
-              localStorage.setItem(PERMANENT_KEY, JSON.stringify({
-                currentLevel: lvl,
-                maxLevel: Math.max(game.maxLevel, lvl),
-                stability: 50,
-                score: 0
+              setGame(prev => ({ 
+                  ...prev, 
+                  currentLevel: lvl, 
+                  maxLevel: Math.max(prev.maxLevel, lvl),
+                  score: 0 
               }));
           }
       }
@@ -344,18 +415,34 @@ export default function VectorFrameFixed() {
 
   const togglePracticeMode = () => {
     playSound('lock', game.soundEnabled);
+    
     setGame(prev => ({ ...prev, isPracticeMode: !prev.isPracticeMode }));
+    
+    // EXPLOIT FIX: If currently playing, regenerate immediately so user cannot
+    // switch to practice, solve the current puzzle leisurely, switch back and score.
+    if (game.status === 'playing') {
+        generateLevel(game.currentLevel);
+    }
   };
 
   const stopGame = () => {
       playSound('click', game.soundEnabled);
+      recordSession();
       setGame(prev => ({ ...prev, status: 'gameover' }));
   };
 
   const resetProgress = () => {
     playSound('click', game.soundEnabled);
-    if (window.confirm("Reset all training progress to Level 1?")) {
-      const newState = { currentLevel: 1, maxLevel: game.maxLevel, stability: 50, score: 0 };
+    if (window.confirm("Reset all training progress?")) {
+      const newState = {
+          currentLevel: 1,
+          maxLevel: game.maxLevel,
+          stability: 50,
+          score: 0,
+          analytics: { tags: {}, sessions: [] },
+          sessionCorrect: 0,
+          sessionTotal: 0
+      };
       setGame(prev => ({ ...prev, ...newState, status: 'idle' }));
       localStorage.setItem(PERMANENT_KEY, JSON.stringify(newState));
     }
@@ -363,6 +450,7 @@ export default function VectorFrameFixed() {
 
   // --- GAME LOOP ---
   const failureHandled = useRef(false);
+
   useEffect(() => {
     if (game.status === 'playing') failureHandled.current = false;
   }, [game.status]);
@@ -370,11 +458,8 @@ export default function VectorFrameFixed() {
   useEffect(() => {
     if (game.status !== 'playing') return;
     
-    // IF PRACTICE MODE: TIMER IS FROZEN
-    if (game.isPracticeMode) {
-        setTimer(100);
-        return; 
-    }
+    // PRACTICE MODE UPDATE: Timer does not decay
+    if (game.isPracticeMode) return;
 
     const decay = 0.25 + (game.currentLevel * 0.04); 
     const interval = setInterval(() => {
@@ -390,11 +475,14 @@ export default function VectorFrameFixed() {
       });
     }, 50); 
     return () => clearInterval(interval);
-  }, [game.status, game.currentLevel, game.isPracticeMode]);
+  }, [game.status, game.currentLevel, game.isPracticeMode]); // Added isPracticeMode dep
 
   // --- INTERACTION ---
+
   const handleSuccess = () => {
     playSound('success', game.soundEnabled);
+    updateAnalytics('win');
+
     const timeBonus = Math.floor(timer);
     const points = (100 + timeBonus) * game.multiplier + (game.currentLevel * 50);
 
@@ -404,54 +492,49 @@ export default function VectorFrameFixed() {
     let nextLevel = game.currentLevel;
     let nextStatus: GameState['status'] = 'playing';
 
-    // Only advance level if NOT in practice mode
     if (!game.isPracticeMode && newStability >= 100) {
         nextLevel++;
         newStability = 50; 
         nextStatus = 'level_up';
     } else if (newStability > 100) {
-        newStability = 100; // Cap stability
+        newStability = 100;
     }
 
     setGame(prev => ({
         ...prev, 
         status: 'success_anim', 
-        score: Math.floor(prev.score + points),
+        score: game.isPracticeMode ? prev.score : Math.floor(prev.score + points),
         stability: newStability, 
         streak: prev.streak + 1,
-        multiplier: Math.min(prev.multiplier + 0.5, 5)
+        multiplier: Math.min(prev.multiplier + 0.5, 5),
+        sessionCorrect: prev.sessionCorrect + 1,
+        sessionTotal: prev.sessionTotal + 1
     }));
 
     setTimeout(() => {
-        // Force new level generation even if level number didn't change
-        generateLevel(nextLevel);
-        
         if (nextStatus === 'level_up') {
             setGame(prev => ({ ...prev, status: 'level_up', currentLevel: nextLevel, maxLevel: Math.max(prev.maxLevel, nextLevel) }));
             setTimeout(() => {
-                requestAnimationFrame(() => {
-                    setGame(prev => ({ ...prev, status: 'playing' }));
-                });
+                generateLevel(nextLevel);
+                requestAnimationFrame(() => setGame(prev => ({ ...prev, status: 'playing' })));
             }, 1200);
         } else {
-            requestAnimationFrame(() => {
-                setGame(prev => ({ ...prev, status: 'playing', currentLevel: nextLevel, maxLevel: Math.max(prev.maxLevel, nextLevel) }));
-            });
+            generateLevel(nextLevel);
+            requestAnimationFrame(() => setGame(prev => ({ ...prev, status: 'playing', currentLevel: nextLevel, maxLevel: Math.max(prev.maxLevel, nextLevel) })));
         }
     }, 400);
   };
 
   const handleFailure = () => {
     playSound('fail', game.soundEnabled);
+    updateAnalytics('loss');
     
-    // PRACTICE MODE LOGIC: Freeze stability
     const stabilityLoss = game.isPracticeMode ? 0 : 30; 
     let newStability = game.stability - stabilityLoss;
     
     let nextLevel = game.currentLevel;
     let nextStatus: GameState['status'] = 'playing';
 
-    // Only drop level if NOT in practice mode
     if (!game.isPracticeMode && newStability <= 0) {
         if (game.currentLevel > 1) {
             nextLevel--;
@@ -465,23 +548,22 @@ export default function VectorFrameFixed() {
     }
 
     setGame(prev => ({
-        ...prev, status: 'success_anim', multiplier: 1, streak: 0, stability: newStability
+        ...prev, 
+        status: 'success_anim', 
+        multiplier: 1, streak: 0, stability: newStability,
+        sessionTotal: prev.sessionTotal + 1
     }));
 
     setTimeout(() => {
-        generateLevel(nextLevel);
-
         if (nextStatus === 'level_down') {
             setGame(prev => ({ ...prev, status: 'level_down', currentLevel: nextLevel }));
             setTimeout(() => {
-                requestAnimationFrame(() => {
-                   setGame(prev => ({ ...prev, status: 'playing', stability: 50 }));
-                });
+                generateLevel(nextLevel);
+                requestAnimationFrame(() => setGame(prev => ({ ...prev, status: 'playing', stability: 50 })));
             }, 1200);
         } else {
-            requestAnimationFrame(() => {
-                setGame(prev => ({ ...prev, status: 'playing', currentLevel: nextLevel, stability: newStability }));
-            });
+            generateLevel(nextLevel);
+            requestAnimationFrame(() => setGame(prev => ({ ...prev, status: 'playing', currentLevel: nextLevel, stability: newStability })));
         }
     }, 500);
   };
@@ -495,6 +577,72 @@ export default function VectorFrameFixed() {
         setFeedbackCell({ x, y, type: 'fail' });
         handleFailure();
     }
+  };
+
+  // --- ANALYTICS VIEW HELPER ---
+  const AnalyticsView = () => {
+      const stats = game.analytics;
+      
+      const weaknesses = Object.entries(stats.tags)
+        .filter(([_, data]) => data.attempts >= 5) 
+        .map(([key, data]) => ({ key, rate: data.failures / data.attempts }))
+        .sort((a, b) => b.rate - a.rate)
+        .slice(0, 3); 
+
+      const now = Date.now();
+      const oneDay = 24 * 60 * 60 * 1000;
+      
+      const getAvgScore = (days: number) => {
+          const relevant = stats.sessions.filter(s => (now - s.timestamp) < (days * oneDay));
+          if (!relevant.length) return 0;
+          return Math.floor(relevant.reduce((a, b) => a + b.score, 0) / relevant.length);
+      };
+
+      return (
+          <motion.div initial={{opacity: 0, y: 20}} animate={{opacity: 1, y: 0}} exit={{opacity: 0}} style={{
+              position: 'absolute', inset: 0, background: '#050505', zIndex: 60, padding: 20, overflowY: 'auto',
+              display: 'flex', flexDirection: 'column', alignItems: 'center'
+          }}>
+              <h2 style={{color: COLORS.white, letterSpacing: '4px', marginBottom: 30, display:'flex', alignItems:'center', gap: 10}}>
+                  <BarChart2 /> NEURAL METRICS
+              </h2>
+
+              <div style={{width: '100%', maxWidth: 500, marginBottom: 40}}>
+                  <h3 style={{color: COLORS.muted, fontSize: 12, marginBottom: 10, letterSpacing: 2}}>COGNITIVE BOTTLENECKS</h3>
+                  {weaknesses.length > 0 ? (
+                      weaknesses.map(w => (
+                          <div key={w.key} style={{
+                              background: '#111', padding: '15px', marginBottom: 8, borderRadius: 8,
+                              borderLeft: `4px solid ${COLORS.inverted}`, display: 'flex', justifyContent: 'space-between'
+                          }}>
+                              <span style={{color: COLORS.white, fontWeight: 'bold'}}>{w.key}</span>
+                              <span style={{color: COLORS.inverted}}>{(w.rate * 100).toFixed(0)}% FAILURE</span>
+                          </div>
+                      ))
+                  ) : (
+                      <div style={{color: '#444', fontStyle: 'italic'}}>Insufficient Data (Play more rounds)</div>
+                  )}
+              </div>
+
+              <div style={{width: '100%', maxWidth: 500, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10}}>
+                    <div style={{background: '#0a0a0a', padding: 20, borderRadius: 8, textAlign: 'center'}}>
+                        <div style={{color: COLORS.muted, fontSize: 10, marginBottom: 5}}>24H AVG SCORE</div>
+                        <div style={{fontSize: 24, color: COLORS.direct}}>{getAvgScore(1).toLocaleString()}</div>
+                    </div>
+                    <div style={{background: '#0a0a0a', padding: 20, borderRadius: 8, textAlign: 'center'}}>
+                        <div style={{color: COLORS.muted, fontSize: 10, marginBottom: 5}}>7D AVG SCORE</div>
+                        <div style={{fontSize: 24, color: COLORS.anchor}}>{getAvgScore(7).toLocaleString()}</div>
+                    </div>
+              </div>
+
+              <button 
+                onClick={() => setGame(prev => ({...prev, status: 'idle'}))}
+                style={{marginTop: 50, background: 'transparent', border: '1px solid #444', color: '#fff', padding: '12px 32px', cursor: 'pointer'}}
+              >
+                  RETURN TO TERMINAL
+              </button>
+          </motion.div>
+      );
   };
 
   // --- RENDER ---
@@ -512,34 +660,33 @@ export default function VectorFrameFixed() {
       gridTemplateColumns: `repeat(${GRID_SIZE}, 1fr)`, 
       gridTemplateRows: `repeat(${GRID_SIZE}, 1fr)`,
       gap: '6px', 
-      width: '100%', maxWidth: '440px', aspectRatio: '1/1', padding: '10px',
+      width: '100%', 
+      maxWidth: '440px', 
+      aspectRatio: '1/1', 
+      padding: '10px',
       background: 'rgba(255,255,255,0.02)', 
       borderRadius: '12px', 
-      border: `2px solid ${game.isPracticeMode ? COLORS.practice : COLORS.gridBorder}`,
+      border: `1px solid ${game.isPracticeMode ? COLORS.practice : COLORS.gridBorder}`,
       boxShadow: '0 0 30px rgba(0,0,0,0.5)',
       position: 'relative' as const
     },
     cell: {
-      background: COLORS.cellBg, borderRadius: '4px', cursor: 'pointer',
+      background: COLORS.cellBg, 
+      borderRadius: '4px', 
+      cursor: 'pointer',
       display: 'flex', alignItems: 'center', justifyContent: 'center', 
-      position: 'relative' as const, width: '100%', height: '100%' 
+      position: 'relative' as const,
+      width: '100%', height: '100%' 
     },
     overlay: {
         position: 'absolute' as const, inset: 0, background: 'rgba(0,0,0,0.92)',
         zIndex: 50, display: 'flex', flexDirection: 'column' as const,
         alignItems: 'center', justifyContent: 'center', padding: '32px'
-    },
-    controlButton: {
-        background: '#1a1a1a', 
-        border: '1px solid #444', 
-        color: '#fff',
-        width: 40, height: 40, borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        cursor: 'pointer', transition: 'all 0.2s',
-        fontSize: '10px', fontWeight: 'bold'
     }
   };
 
   const isBlindLevel = game.currentLevel >= 15;
+  const accuracy = game.sessionTotal > 0 ? Math.round((game.sessionCorrect / game.sessionTotal) * 100) : 100;
 
   return (
     <div style={styles.container}>
@@ -556,15 +703,19 @@ export default function VectorFrameFixed() {
             </div>
         </div>
         <div style={{textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end'}}>
-            <div style={{fontSize: '10px', color: COLORS.muted, letterSpacing: '1px'}}>COGNITIVE LOAD</div>
-            <div style={{fontSize: '20px', fontWeight: 800, color: COLORS.anchor}}>{game.score.toLocaleString()}</div>
+            <div style={{fontSize: '10px', color: COLORS.muted, letterSpacing: '1px', display:'flex', alignItems:'center', gap: 4}}>
+                <Activity size={10} /> SYNAPTIC FIDELITY
+            </div>
+            <div style={{fontSize: '20px', fontWeight: 800, color: accuracy > 90 ? COLORS.direct : (accuracy > 70 ? COLORS.white : COLORS.inverted)}}>
+                {accuracy}%
+            </div>
         </div>
       </div>
 
-      {/* CONTROLS */}
+      {/* STABILITY METER + CONTROLS */}
       <div style={{ width: '100%', maxWidth: '440px', marginBottom: '24px', zIndex: 10, display: 'flex', alignItems: 'center', gap: 12 }}>
           {/* Stability Bar */}
-          <div style={{flex: 1, height: '8px', background: '#222', borderRadius: '4px', overflow: 'hidden', opacity: game.isPracticeMode ? 0.3 : 1}}>
+          <div style={{flex: 1, height: '6px', background: '#222', borderRadius: '3px', overflow: 'hidden', opacity: game.isPracticeMode ? 0.3 : 1}}>
               <motion.div 
                 animate={{ width: `${game.stability}%`, backgroundColor: game.stability > 50 ? COLORS.anchor : COLORS.inverted }}
                 transition={{ duration: 0.5 }}
@@ -575,14 +726,16 @@ export default function VectorFrameFixed() {
            {/* PRACTICE TOGGLE */}
            <button 
               onClick={togglePracticeMode}
-              title={game.isPracticeMode ? "Exit Practice Mode" : "Enter Practice Mode"}
+              title={game.isPracticeMode ? "Resume Progression" : "Freeze Level (Practice)"}
               style={{
-                  ...styles.controlButton,
-                  borderColor: game.isPracticeMode ? COLORS.practice : '#444',
-                  color: game.isPracticeMode ? COLORS.practice : '#fff'
+                  background: 'transparent', 
+                  border: `1px solid ${game.isPracticeMode ? COLORS.practice : '#ffffff'}`, 
+                  color: game.isPracticeMode ? COLORS.practice : '#ffffff',
+                  width: 32, height: 32, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  cursor: 'pointer', transition: 'all 0.2s'
               }}
            >
-              {game.isPracticeMode ? <Lock size={18} /> : <Unlock size={18} />}
+              {game.isPracticeMode ? <Lock size={16} /> : <Unlock size={16} />}
            </button>
 
            {/* STOP BUTTON */}
@@ -590,18 +743,27 @@ export default function VectorFrameFixed() {
               onClick={stopGame}
               title="End Session"
               disabled={game.status !== 'playing'}
-              style={{...styles.controlButton, opacity: game.status === 'playing' ? 1 : 0.5}}
+              style={{
+                  background: 'transparent', border: '1px solid #ffffff', color: '#ffffff',
+                  width: 32, height: 32, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  cursor: game.status === 'playing' ? 'pointer' : 'default', opacity: game.status === 'playing' ? 1 : 0.5,
+                  transition: 'all 0.2s'
+              }}
            >
-              <StopCircle size={18} />
+              <StopCircle size={16} />
            </button>
 
            {/* RESET BUTTON */}
            <button 
               onClick={resetProgress}
               title="Reset All Progress"
-              style={styles.controlButton}
+              style={{
+                  background: 'transparent', border: '1px solid #ffffff', color: '#ffffff',
+                  width: 32, height: 32, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  cursor: 'pointer', transition: 'all 0.2s'
+              }}
            >
-              <RotateCcw size={18} />
+              <RotateCcw size={16} />
            </button>
       </div>
 
@@ -648,13 +810,7 @@ export default function VectorFrameFixed() {
 
       {/* TIMER */}
       <motion.div style={{ width: '100%', maxWidth: '440px', height: '2px', background: '#222', marginBottom: '20px' }}>
-          <motion.div 
-            animate={{ 
-                width: `${timer}%`,
-                backgroundColor: game.isPracticeMode ? COLORS.practice : '#fff'
-            }} 
-            style={{ height: '100%', opacity: game.isPracticeMode ? 1 : 0.3 }} 
-          />
+          <motion.div animate={{ width: `${timer}%` }} style={{ height: '100%', background: '#fff', opacity: game.isPracticeMode ? 0 : 0.3 }} />
       </motion.div>
 
       {/* GRID */}
@@ -683,7 +839,7 @@ export default function VectorFrameFixed() {
                     }}
                 >
                     {isAnchor && (
-                         <motion.div
+                          <motion.div
                             animate={{ rotate: anchorRotation, opacity: (isBlindLevel && game.status === 'playing') ? 0 : 1 }}
                             transition={{ 
                                 rotate: { type: 'spring', stiffness: 200, damping: 20 },
@@ -694,6 +850,7 @@ export default function VectorFrameFixed() {
                             <ArrowUp size={36} color={COLORS.anchor} fill={COLORS.anchor} style={{ filter: 'drop-shadow(0 0 8px rgba(0,204,255,0.5))' }} />
                         </motion.div>
                     )}
+                    {/* Compass marks */}
                     {game.currentLevel >= 7 && (
                         <div style={{position:'absolute', inset: 2, pointerEvents:'none', opacity: 0.1}}>
                             {x===GRID_SIZE-1 && y===0 && <div style={{width: 4, height: 4, background: COLORS.absolute, borderRadius: '50%'}}/>}
@@ -704,8 +861,10 @@ export default function VectorFrameFixed() {
          })}
       </div>
 
-      {/* MENU / OVERLAYS */}
+      {/* ANALYTICS VIEW */}
       <AnimatePresence>
+        {game.status === 'analytics' && <AnalyticsView />}
+
         {game.status === 'idle' && (
             <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} style={styles.overlay}>
                 <div style={{width: 60, height: 60, border: `2px solid ${COLORS.anchor}`, borderRadius: '50%', display:'flex', alignItems:'center', justifyContent:'center', marginBottom: 24}}>
@@ -728,14 +887,32 @@ export default function VectorFrameFixed() {
                 </div>
 
                 <div style={{display:'flex', flexDirection: 'column', gap: 12}}>
-                    <button onClick={startGame} style={{background: COLORS.anchor, border: 'none', padding: '16px 48px', fontWeight: 'bold', cursor: 'pointer', borderRadius: 6}}>
+                    <button onClick={startGame} style={{background: COLORS.anchor, border: 'none', padding: '16px 48px', fontWeight: 'bold', cursor: 'pointer'}}>
                         {game.currentLevel > 1 ? 'RESUME PROTOCOL' : 'INITIATE'}
+                    </button>
+                    <button onClick={() => setGame(prev => ({...prev, status: 'analytics'}))} style={{background: 'transparent', border: '1px solid #333', color: '#fff', padding: '12px', cursor: 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8}}>
+                        <BarChart2 size={14}/> VIEW NEURAL METRICS
                     </button>
                 </div>
             </motion.div>
         )}
-        
-        {/* Same Game Over / Level Up screens as before... */}
+
+        {game.status === 'level_up' && (
+            <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} style={{...styles.overlay, background: 'rgba(0,0,0,0.8)'}}>
+                <TrendingUp size={64} color={COLORS.direct} />
+                <h2 style={{color: '#fff', marginTop: 24}}>LEVEL {game.currentLevel}</h2>
+                <div style={{color: COLORS.direct, fontSize: '12px', letterSpacing: '2px'}}>NEURAL PLASTICITY INCREASED</div>
+            </motion.div>
+        )}
+
+        {game.status === 'level_down' && (
+            <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} style={{...styles.overlay, background: 'rgba(0,0,0,0.8)'}}>
+                <AlertTriangle size={64} color={COLORS.inverted} />
+                <h2 style={{color: '#fff', marginTop: 24}}>LEVEL {game.currentLevel}</h2>
+                <div style={{color: COLORS.inverted, fontSize: '12px', letterSpacing: '2px'}}>STABILITY CRITICAL</div>
+            </motion.div>
+        )}
+
         {game.status === 'gameover' && (
             <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} style={styles.overlay}>
                 {game.stability <= 0 ? (
@@ -752,13 +929,15 @@ export default function VectorFrameFixed() {
                     </>
                 )}
                 
-                <div style={{fontSize: '32px', fontWeight: 'bold', color: COLORS.anchor, marginBottom: 48}}>{game.score}</div>
+                <div style={{fontSize: '32px', fontWeight: 'bold', color: COLORS.anchor, marginBottom: 48}}>
+                    {Math.round((game.sessionCorrect / (game.sessionTotal || 1)) * 100)}% PRECISION
+                </div>
                 
                 <div style={{display:'flex', gap: 16}}>
-                    <button onClick={startGame} style={{background: 'transparent', border: '1px solid #fff', color: '#fff', padding: '12px 24px', cursor:'pointer', borderRadius: 4}}>
+                    <button onClick={startGame} style={{background: 'transparent', border: '1px solid #fff', color: '#fff', padding: '12px 24px', cursor:'pointer'}}>
                         RESUME
                     </button>
-                    <button onClick={() => setGame(g => ({...g, status: 'idle'}))} style={{background: '#fff', border: 'none', padding: '12px 24px', cursor:'pointer', borderRadius: 4}}>
+                    <button onClick={() => setGame(g => ({...g, status: 'idle'}))} style={{background: '#fff', border: 'none', padding: '12px 24px', cursor:'pointer'}}>
                         MENU
                     </button>
                 </div>
