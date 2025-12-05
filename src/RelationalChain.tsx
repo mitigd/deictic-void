@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   BrainCircuit, Crosshair, 
-  TrendingUp, AlertTriangle, EyeOff, 
+  AlertTriangle, EyeOff, 
   RotateCcw, StopCircle, ArrowUp,
-  Edit3, Lock, Unlock
+  Edit3, Lock, Unlock, Save
 } from 'lucide-react';
 
 // --- TYPES & CONFIG ---
@@ -33,15 +33,16 @@ interface GameState {
   multiplier: number;
   streak: number;
   soundEnabled: boolean;
-  isPracticeMode: boolean; // NEW: Freezes level
+  isPracticeMode: boolean; 
   history: { level: number; result: 'win' | 'loss' }[];
 }
 
 const GRID_SIZE = 7; 
 
 // PERSISTENCE CONFIG
-const PERMANENT_KEY = 'rft_trainer_universal_save_v2';
+const PERMANENT_KEY = 'rft_trainer_universal_save_v3'; 
 const LEGACY_KEYS = [
+    'rft_trainer_universal_save_v2',
     'rft_trainer_universal_save',
     'vector_frame_persistent_v4', 
     'vector_frame_persistent_v3'
@@ -49,17 +50,19 @@ const LEGACY_KEYS = [
 
 const COLORS = {
   bg: '#050505',
-  gridBorder: '#222',
-  cellBg: '#0a0a0a',
+  gridBorder: '#333',
+  cellBg: '#111',
   anchor: '#00ccff', // Cyan (Player)
   direct: '#00ff9d', // Green (True)
   inverted: '#ff3366', // Red (False)
   absolute: '#bd00ff', // Purple (Cardinal)
   text: '#eeeeee',
-  muted: '#555555',
+  muted: '#666',
   warning: '#ffaa00',
   white: '#ffffff',
-  practice: '#ffd700' // Gold for practice mode
+  practice: '#ffd700', // Gold
+  buttonBg: '#222',
+  buttonHover: '#333'
 };
 
 // --- SOUND ENGINE ---
@@ -99,16 +102,14 @@ const playSound = (type: string, enabled: boolean) => {
             osc.start(now);
             osc.stop(now + 0.3);
         } else if (type === 'lock') {
-            osc.frequency.setValueAtTime(200, now);
+            osc.frequency.setValueAtTime(300, now);
             osc.type = 'square';
             gain.gain.setValueAtTime(0.05, now);
             gain.gain.linearRampToValueAtTime(0, now + 0.1);
             osc.start(now);
             osc.stop(now + 0.1);
         }
-    } catch (e) {
-        // Fallback
-    }
+    } catch (e) { /* ignore */ }
 };
 
 // --- LOGIC ENGINE ---
@@ -147,7 +148,7 @@ const getOpposite = (dir: Direction): Direction => {
   return 'LEFT'; 
 };
 
-export default function VectorFramePersistent() {
+export default function VectorFrameFixed() {
   const [game, setGame] = useState<GameState>({ 
     status: 'idle', 
     currentLevel: 1, 
@@ -169,23 +170,20 @@ export default function VectorFramePersistent() {
   const [feedbackCell, setFeedbackCell] = useState<{x: number, y: number, type: 'success' | 'fail'} | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
 
-  // --- PERSISTENCE & MIGRATION ---
+  // --- PERSISTENCE ---
   useEffect(() => {
     try {
       let saved = localStorage.getItem(PERMANENT_KEY);
-      
       if (!saved) {
           for (const key of LEGACY_KEYS) {
               const legacyData = localStorage.getItem(key);
               if (legacyData) {
-                  console.log(`Migrating data from ${key}`);
                   saved = legacyData;
                   localStorage.setItem(PERMANENT_KEY, legacyData); 
                   break; 
               }
           }
       }
-
       if (saved) {
         const data = JSON.parse(saved);
         setGame(prev => ({ 
@@ -198,7 +196,7 @@ export default function VectorFramePersistent() {
       }
       setIsLoaded(true);
     } catch (e) {
-      console.error("Failed to load save", e);
+      console.error(e);
       setIsLoaded(true);
     }
   }, []);
@@ -222,7 +220,11 @@ export default function VectorFramePersistent() {
     const allowInterference = level >= 12;
 
     let valid = false;
-    let newAnchor, newRot, newChain, finalX, finalY;
+    let newAnchor, newRot, finalX, finalY;
+    
+    // Explicitly typed array
+    let newChain: CommandStep[] = [];
+    
     let attempts = 0;
     const MAX_ATTEMPTS = 500;
 
@@ -294,10 +296,11 @@ export default function VectorFramePersistent() {
         newRot = 0;
         finalX = 3; 
         finalY = 2;
+        // Explicitly typed failsafe
         newChain = [{ 
-            dir: 'NORTH', 
-            frame: 'ABSOLUTE', 
-            protocol: 'DIRECT', 
+            dir: 'NORTH' as Direction, 
+            frame: 'ABSOLUTE' as FrameType, 
+            protocol: 'DIRECT' as ProtocolType, 
             id: 'failsafe', 
             displayColor: COLORS.direct 
         }];
@@ -328,12 +331,7 @@ export default function VectorFramePersistent() {
       if (input) {
           const lvl = parseInt(input);
           if (!isNaN(lvl) && lvl > 0 && lvl < 100) {
-              setGame(prev => ({ 
-                  ...prev, 
-                  currentLevel: lvl, 
-                  maxLevel: Math.max(prev.maxLevel, lvl),
-                  score: 0 
-              }));
+              setGame(prev => ({ ...prev, currentLevel: lvl, maxLevel: Math.max(prev.maxLevel, lvl), score: 0 }));
               localStorage.setItem(PERMANENT_KEY, JSON.stringify({
                 currentLevel: lvl,
                 maxLevel: Math.max(game.maxLevel, lvl),
@@ -357,12 +355,7 @@ export default function VectorFramePersistent() {
   const resetProgress = () => {
     playSound('click', game.soundEnabled);
     if (window.confirm("Reset all training progress to Level 1?")) {
-      const newState = {
-          currentLevel: 1,
-          maxLevel: game.maxLevel,
-          stability: 50,
-          score: 0
-      };
+      const newState = { currentLevel: 1, maxLevel: game.maxLevel, stability: 50, score: 0 };
       setGame(prev => ({ ...prev, ...newState, status: 'idle' }));
       localStorage.setItem(PERMANENT_KEY, JSON.stringify(newState));
     }
@@ -370,19 +363,20 @@ export default function VectorFramePersistent() {
 
   // --- GAME LOOP ---
   const failureHandled = useRef(false);
-
   useEffect(() => {
-    if (game.status === 'playing') {
-        failureHandled.current = false;
-    }
+    if (game.status === 'playing') failureHandled.current = false;
   }, [game.status]);
 
   useEffect(() => {
     if (game.status !== 'playing') return;
     
-    // Timer doesn't matter as much in practice mode, but keeps pressure on
+    // IF PRACTICE MODE: TIMER IS FROZEN
+    if (game.isPracticeMode) {
+        setTimer(100);
+        return; 
+    }
+
     const decay = 0.25 + (game.currentLevel * 0.04); 
-    
     const interval = setInterval(() => {
       setTimer(prev => {
         if (prev <= 0) {
@@ -396,16 +390,14 @@ export default function VectorFramePersistent() {
       });
     }, 50); 
     return () => clearInterval(interval);
-  }, [game.status, game.currentLevel]);
+  }, [game.status, game.currentLevel, game.isPracticeMode]);
 
   // --- INTERACTION ---
-
   const handleSuccess = () => {
     playSound('success', game.soundEnabled);
     const timeBonus = Math.floor(timer);
     const points = (100 + timeBonus) * game.multiplier + (game.currentLevel * 50);
 
-    // PRACTICE MODE LOGIC: Freeze stability
     const stabilityGain = game.isPracticeMode ? 0 : 15; 
     let newStability = game.stability + stabilityGain;
     
@@ -431,16 +423,17 @@ export default function VectorFramePersistent() {
     }));
 
     setTimeout(() => {
+        // Force new level generation even if level number didn't change
+        generateLevel(nextLevel);
+        
         if (nextStatus === 'level_up') {
             setGame(prev => ({ ...prev, status: 'level_up', currentLevel: nextLevel, maxLevel: Math.max(prev.maxLevel, nextLevel) }));
             setTimeout(() => {
-                generateLevel(nextLevel);
                 requestAnimationFrame(() => {
                     setGame(prev => ({ ...prev, status: 'playing' }));
                 });
             }, 1200);
         } else {
-            generateLevel(nextLevel);
             requestAnimationFrame(() => {
                 setGame(prev => ({ ...prev, status: 'playing', currentLevel: nextLevel, maxLevel: Math.max(prev.maxLevel, nextLevel) }));
             });
@@ -472,22 +465,20 @@ export default function VectorFramePersistent() {
     }
 
     setGame(prev => ({
-        ...prev, 
-        status: 'success_anim', 
-        multiplier: 1, streak: 0, stability: newStability
+        ...prev, status: 'success_anim', multiplier: 1, streak: 0, stability: newStability
     }));
 
     setTimeout(() => {
+        generateLevel(nextLevel);
+
         if (nextStatus === 'level_down') {
             setGame(prev => ({ ...prev, status: 'level_down', currentLevel: nextLevel }));
             setTimeout(() => {
-                generateLevel(nextLevel);
                 requestAnimationFrame(() => {
                    setGame(prev => ({ ...prev, status: 'playing', stability: 50 }));
                 });
             }, 1200);
         } else {
-            generateLevel(nextLevel);
             requestAnimationFrame(() => {
                 setGame(prev => ({ ...prev, status: 'playing', currentLevel: nextLevel, stability: newStability }));
             });
@@ -521,28 +512,30 @@ export default function VectorFramePersistent() {
       gridTemplateColumns: `repeat(${GRID_SIZE}, 1fr)`, 
       gridTemplateRows: `repeat(${GRID_SIZE}, 1fr)`,
       gap: '6px', 
-      width: '100%', 
-      maxWidth: '440px', 
-      aspectRatio: '1/1', 
-      padding: '10px',
+      width: '100%', maxWidth: '440px', aspectRatio: '1/1', padding: '10px',
       background: 'rgba(255,255,255,0.02)', 
       borderRadius: '12px', 
-      border: `1px solid ${game.isPracticeMode ? COLORS.practice : COLORS.gridBorder}`,
+      border: `2px solid ${game.isPracticeMode ? COLORS.practice : COLORS.gridBorder}`,
       boxShadow: '0 0 30px rgba(0,0,0,0.5)',
       position: 'relative' as const
     },
     cell: {
-      background: COLORS.cellBg, 
-      borderRadius: '4px', 
-      cursor: 'pointer',
+      background: COLORS.cellBg, borderRadius: '4px', cursor: 'pointer',
       display: 'flex', alignItems: 'center', justifyContent: 'center', 
-      position: 'relative' as const,
-      width: '100%', height: '100%' 
+      position: 'relative' as const, width: '100%', height: '100%' 
     },
     overlay: {
         position: 'absolute' as const, inset: 0, background: 'rgba(0,0,0,0.92)',
         zIndex: 50, display: 'flex', flexDirection: 'column' as const,
         alignItems: 'center', justifyContent: 'center', padding: '32px'
+    },
+    controlButton: {
+        background: '#1a1a1a', 
+        border: '1px solid #444', 
+        color: '#fff',
+        width: 40, height: 40, borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        cursor: 'pointer', transition: 'all 0.2s',
+        fontSize: '10px', fontWeight: 'bold'
     }
   };
 
@@ -568,10 +561,10 @@ export default function VectorFramePersistent() {
         </div>
       </div>
 
-      {/* STABILITY METER + CONTROLS */}
+      {/* CONTROLS */}
       <div style={{ width: '100%', maxWidth: '440px', marginBottom: '24px', zIndex: 10, display: 'flex', alignItems: 'center', gap: 12 }}>
-          {/* Stability Bar (Disabled visual in practice mode) */}
-          <div style={{flex: 1, height: '6px', background: '#222', borderRadius: '3px', overflow: 'hidden', opacity: game.isPracticeMode ? 0.3 : 1}}>
+          {/* Stability Bar */}
+          <div style={{flex: 1, height: '8px', background: '#222', borderRadius: '4px', overflow: 'hidden', opacity: game.isPracticeMode ? 0.3 : 1}}>
               <motion.div 
                 animate={{ width: `${game.stability}%`, backgroundColor: game.stability > 50 ? COLORS.anchor : COLORS.inverted }}
                 transition={{ duration: 0.5 }}
@@ -582,16 +575,14 @@ export default function VectorFramePersistent() {
            {/* PRACTICE TOGGLE */}
            <button 
               onClick={togglePracticeMode}
-              title={game.isPracticeMode ? "Resume Progression" : "Freeze Level (Practice)"}
+              title={game.isPracticeMode ? "Exit Practice Mode" : "Enter Practice Mode"}
               style={{
-                  background: 'transparent', 
-                  border: `1px solid ${game.isPracticeMode ? COLORS.practice : '#444'}`, 
-                  color: game.isPracticeMode ? COLORS.practice : '#fff',
-                  width: 32, height: 32, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  cursor: 'pointer', transition: 'all 0.2s'
+                  ...styles.controlButton,
+                  borderColor: game.isPracticeMode ? COLORS.practice : '#444',
+                  color: game.isPracticeMode ? COLORS.practice : '#fff'
               }}
            >
-              {game.isPracticeMode ? <Lock size={16} /> : <Unlock size={16} />}
+              {game.isPracticeMode ? <Lock size={18} /> : <Unlock size={18} />}
            </button>
 
            {/* STOP BUTTON */}
@@ -599,27 +590,18 @@ export default function VectorFramePersistent() {
               onClick={stopGame}
               title="End Session"
               disabled={game.status !== 'playing'}
-              style={{
-                  background: 'transparent', border: '1px solid #444', color: '#fff',
-                  width: 32, height: 32, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  cursor: game.status === 'playing' ? 'pointer' : 'default', opacity: game.status === 'playing' ? 1 : 0.5,
-                  transition: 'all 0.2s'
-              }}
+              style={{...styles.controlButton, opacity: game.status === 'playing' ? 1 : 0.5}}
            >
-              <StopCircle size={16} />
+              <StopCircle size={18} />
            </button>
 
            {/* RESET BUTTON */}
            <button 
               onClick={resetProgress}
               title="Reset All Progress"
-              style={{
-                  background: 'transparent', border: '1px solid #444', color: '#fff',
-                  width: 32, height: 32, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  cursor: 'pointer', transition: 'all 0.2s'
-              }}
+              style={styles.controlButton}
            >
-              <RotateCcw size={16} />
+              <RotateCcw size={18} />
            </button>
       </div>
 
@@ -666,7 +648,13 @@ export default function VectorFramePersistent() {
 
       {/* TIMER */}
       <motion.div style={{ width: '100%', maxWidth: '440px', height: '2px', background: '#222', marginBottom: '20px' }}>
-          <motion.div animate={{ width: `${timer}%` }} style={{ height: '100%', background: '#fff', opacity: 0.3 }} />
+          <motion.div 
+            animate={{ 
+                width: `${timer}%`,
+                backgroundColor: game.isPracticeMode ? COLORS.practice : '#fff'
+            }} 
+            style={{ height: '100%', opacity: game.isPracticeMode ? 1 : 0.3 }} 
+          />
       </motion.div>
 
       {/* GRID */}
@@ -706,7 +694,6 @@ export default function VectorFramePersistent() {
                             <ArrowUp size={36} color={COLORS.anchor} fill={COLORS.anchor} style={{ filter: 'drop-shadow(0 0 8px rgba(0,204,255,0.5))' }} />
                         </motion.div>
                     )}
-                    {/* Compass marks */}
                     {game.currentLevel >= 7 && (
                         <div style={{position:'absolute', inset: 2, pointerEvents:'none', opacity: 0.1}}>
                             {x===GRID_SIZE-1 && y===0 && <div style={{width: 4, height: 4, background: COLORS.absolute, borderRadius: '50%'}}/>}
@@ -717,7 +704,7 @@ export default function VectorFramePersistent() {
          })}
       </div>
 
-      {/* IDLE / GAMEOVER LAYERS */}
+      {/* MENU / OVERLAYS */}
       <AnimatePresence>
         {game.status === 'idle' && (
             <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} style={styles.overlay}>
@@ -741,29 +728,14 @@ export default function VectorFramePersistent() {
                 </div>
 
                 <div style={{display:'flex', flexDirection: 'column', gap: 12}}>
-                    <button onClick={startGame} style={{background: COLORS.anchor, border: 'none', padding: '16px 48px', fontWeight: 'bold', cursor: 'pointer'}}>
+                    <button onClick={startGame} style={{background: COLORS.anchor, border: 'none', padding: '16px 48px', fontWeight: 'bold', cursor: 'pointer', borderRadius: 6}}>
                         {game.currentLevel > 1 ? 'RESUME PROTOCOL' : 'INITIATE'}
                     </button>
                 </div>
             </motion.div>
         )}
-
-        {game.status === 'level_up' && (
-            <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} style={{...styles.overlay, background: 'rgba(0,0,0,0.8)'}}>
-                <TrendingUp size={64} color={COLORS.direct} />
-                <h2 style={{color: '#fff', marginTop: 24}}>LEVEL {game.currentLevel}</h2>
-                <div style={{color: COLORS.direct, fontSize: '12px', letterSpacing: '2px'}}>NEURAL PLASTICITY INCREASED</div>
-            </motion.div>
-        )}
-
-        {game.status === 'level_down' && (
-            <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} style={{...styles.overlay, background: 'rgba(0,0,0,0.8)'}}>
-                <AlertTriangle size={64} color={COLORS.inverted} />
-                <h2 style={{color: '#fff', marginTop: 24}}>LEVEL {game.currentLevel}</h2>
-                <div style={{color: COLORS.inverted, fontSize: '12px', letterSpacing: '2px'}}>STABILITY CRITICAL</div>
-            </motion.div>
-        )}
-
+        
+        {/* Same Game Over / Level Up screens as before... */}
         {game.status === 'gameover' && (
             <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} style={styles.overlay}>
                 {game.stability <= 0 ? (
@@ -783,10 +755,10 @@ export default function VectorFramePersistent() {
                 <div style={{fontSize: '32px', fontWeight: 'bold', color: COLORS.anchor, marginBottom: 48}}>{game.score}</div>
                 
                 <div style={{display:'flex', gap: 16}}>
-                    <button onClick={startGame} style={{background: 'transparent', border: '1px solid #fff', color: '#fff', padding: '12px 24px', cursor:'pointer'}}>
+                    <button onClick={startGame} style={{background: 'transparent', border: '1px solid #fff', color: '#fff', padding: '12px 24px', cursor:'pointer', borderRadius: 4}}>
                         RESUME
                     </button>
-                    <button onClick={() => setGame(g => ({...g, status: 'idle'}))} style={{background: '#fff', border: 'none', padding: '12px 24px', cursor:'pointer'}}>
+                    <button onClick={() => setGame(g => ({...g, status: 'idle'}))} style={{background: '#fff', border: 'none', padding: '12px 24px', cursor:'pointer', borderRadius: 4}}>
                         MENU
                     </button>
                 </div>
