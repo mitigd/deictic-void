@@ -3,7 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { 
   BrainCircuit, Crosshair, 
   TrendingUp, AlertTriangle, EyeOff, 
-  RotateCcw, Save, StopCircle, ArrowUp
+  RotateCcw, StopCircle, ArrowUp,
+  Edit3, Lock, Unlock
 } from 'lucide-react';
 
 // --- TYPES & CONFIG ---
@@ -32,11 +33,19 @@ interface GameState {
   multiplier: number;
   streak: number;
   soundEnabled: boolean;
+  isPracticeMode: boolean; // NEW: Freezes level
   history: { level: number; result: 'win' | 'loss' }[];
 }
 
 const GRID_SIZE = 7; 
-const STORAGE_KEY = 'vector_frame_persistent_v4';
+
+// PERSISTENCE CONFIG
+const PERMANENT_KEY = 'rft_trainer_universal_save_v2';
+const LEGACY_KEYS = [
+    'rft_trainer_universal_save',
+    'vector_frame_persistent_v4', 
+    'vector_frame_persistent_v3'
+];
 
 const COLORS = {
   bg: '#050505',
@@ -49,13 +58,13 @@ const COLORS = {
   text: '#eeeeee',
   muted: '#555555',
   warning: '#ffaa00',
-  white: '#ffffff'
+  white: '#ffffff',
+  practice: '#ffd700' // Gold for practice mode
 };
 
 // --- SOUND ENGINE ---
 const playSound = (type: string, enabled: boolean) => {
     if (!enabled) return;
-    // AudioContext logic wrapped to prevent errors on some browsers/strict modes
     try {
         const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
         if (!AudioContext) return;
@@ -89,31 +98,34 @@ const playSound = (type: string, enabled: boolean) => {
             gain.gain.linearRampToValueAtTime(0, now + 0.3);
             osc.start(now);
             osc.stop(now + 0.3);
+        } else if (type === 'lock') {
+            osc.frequency.setValueAtTime(200, now);
+            osc.type = 'square';
+            gain.gain.setValueAtTime(0.05, now);
+            gain.gain.linearRampToValueAtTime(0, now + 0.1);
+            osc.start(now);
+            osc.stop(now + 0.1);
         }
     } catch (e) {
-        // Fallback or silence
+        // Fallback
     }
 };
 
 // --- LOGIC ENGINE ---
 
-// FIX 1: Robust Modulo for Negative Rotations
 const safeMod = (n: number, m: number) => ((n % m) + m) % m;
 
 const getVector = (rotation: number, dir: Direction): { dx: number, dy: number } => {
-  // Absolute overrides
   if (dir === 'NORTH') return { dx: 0, dy: -1 };
   if (dir === 'SOUTH') return { dx: 0, dy: 1 };
   if (dir === 'EAST') return { dx: 1, dy: 0 };
   if (dir === 'WEST') return { dx: -1, dy: 0 };
 
-  // Relative logic
   let angleOffset = 0;
   if (dir === 'RIGHT') angleOffset = 90;
   if (dir === 'BACK') angleOffset = 180;
   if (dir === 'LEFT') angleOffset = 270;
 
-  // Use safeMod to prevent -90 bugs
   const finalAngle = safeMod(rotation + angleOffset, 360);
   
   if (finalAngle === 0) return { dx: 0, dy: -1 };
@@ -135,7 +147,7 @@ const getOpposite = (dir: Direction): Direction => {
   return 'LEFT'; 
 };
 
-export default function VectorFrameUnbreakable() {
+export default function VectorFramePersistent() {
   const [game, setGame] = useState<GameState>({ 
     status: 'idle', 
     currentLevel: 1, 
@@ -145,6 +157,7 @@ export default function VectorFrameUnbreakable() {
     multiplier: 1, 
     streak: 0,
     soundEnabled: true,
+    isPracticeMode: false,
     history: []
   });
   
@@ -154,11 +167,25 @@ export default function VectorFrameUnbreakable() {
   const [chain, setChain] = useState<CommandStep[]>([]);
   const targetPos = useRef<{x: number, y: number} | null>(null);
   const [feedbackCell, setFeedbackCell] = useState<{x: number, y: number, type: 'success' | 'fail'} | null>(null);
+  const [isLoaded, setIsLoaded] = useState(false);
 
-  // --- PERSISTENCE ---
+  // --- PERSISTENCE & MIGRATION ---
   useEffect(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
+      let saved = localStorage.getItem(PERMANENT_KEY);
+      
+      if (!saved) {
+          for (const key of LEGACY_KEYS) {
+              const legacyData = localStorage.getItem(key);
+              if (legacyData) {
+                  console.log(`Migrating data from ${key}`);
+                  saved = legacyData;
+                  localStorage.setItem(PERMANENT_KEY, legacyData); 
+                  break; 
+              }
+          }
+      }
+
       if (saved) {
         const data = JSON.parse(saved);
         setGame(prev => ({ 
@@ -169,25 +196,26 @@ export default function VectorFrameUnbreakable() {
           score: data.score || 0
         }));
       }
+      setIsLoaded(true);
     } catch (e) {
       console.error("Failed to load save", e);
+      setIsLoaded(true);
     }
   }, []);
 
   useEffect(() => {
-    if (game.status !== 'idle') {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    if (isLoaded && game.status !== 'idle') {
+      localStorage.setItem(PERMANENT_KEY, JSON.stringify({
         currentLevel: game.currentLevel,
         maxLevel: game.maxLevel,
         stability: game.stability,
         score: game.score
       }));
     }
-  }, [game.currentLevel, game.maxLevel, game.stability, game.score, game.status]);
+  }, [game.currentLevel, game.maxLevel, game.stability, game.score, game.status, isLoaded]);
 
   // --- ALGORITHM ---
   const generateLevel = useCallback((level: number) => {
-    // Difficulty Scaling
     const chainLength = level < 5 ? 1 : (level < 10 ? 2 : (level < 15 ? 3 : 4));
     const allowInversion = level >= 4;
     const allowAbsolute = level >= 7;
@@ -196,15 +224,11 @@ export default function VectorFrameUnbreakable() {
     let valid = false;
     let newAnchor, newRot, newChain, finalX, finalY;
     let attempts = 0;
-    
-    // Safety Limit: 500 attempts before hard failsafe
     const MAX_ATTEMPTS = 500;
 
     while (!valid && attempts < MAX_ATTEMPTS) {
       attempts++;
       
-      // FIX 2: CENTER BIAS TO PREVENT OOB
-      // Level 1-3: No bias. Level 4-9: Inner 5x5. Level 10+: Inner 3x3.
       const padding = chainLength > 1 ? (chainLength > 3 ? 2 : 1) : 0;
       const safeSize = GRID_SIZE - (padding * 2);
 
@@ -239,7 +263,6 @@ export default function VectorFrameUnbreakable() {
         currentX += vec.dx;
         currentY += vec.dy;
         
-        // Stroop Logic
         let displayColor = protocol === 'DIRECT' ? COLORS.direct : COLORS.inverted;
         if (allowInterference && Math.random() > 0.5) {
             displayColor = Math.random() > 0.5 ? COLORS.inverted : COLORS.direct;
@@ -253,7 +276,6 @@ export default function VectorFrameUnbreakable() {
             displayColor
         });
 
-        // BOUNDS CHECK - Stop immediately if OOB
         if (currentX < 0 || currentX >= GRID_SIZE || currentY < 0 || currentY >= GRID_SIZE) {
           pathFailed = true; 
           break;
@@ -267,14 +289,11 @@ export default function VectorFrameUnbreakable() {
       }
     }
 
-    // FIX 3: HARD FAILSAFE
-    // If random gen fails 500 times, inject a dead-simple level so the game doesn't break
     if (!valid) {
-        console.warn("Generation Failsafe Triggered");
         newAnchor = { x: 3, y: 3 };
         newRot = 0;
         finalX = 3; 
-        finalY = 2; // North
+        finalY = 2;
         newChain = [{ 
             dir: 'NORTH', 
             frame: 'ABSOLUTE', 
@@ -294,7 +313,7 @@ export default function VectorFrameUnbreakable() {
 
   const startGame = () => {
     playSound('click', game.soundEnabled);
-    generateLevel(game.currentLevel); // Generate first
+    generateLevel(game.currentLevel); 
     setGame(prev => ({ 
         ...prev, 
         status: 'playing', 
@@ -304,18 +323,30 @@ export default function VectorFrameUnbreakable() {
     }));
   };
 
-  const resetProgress = () => {
-      playSound('click', game.soundEnabled);
-      if (window.confirm("Reset all training progress to Level 1?")) {
-        const newState = {
-            currentLevel: 1,
-            maxLevel: game.maxLevel,
-            stability: 50,
-            score: 0
-        };
-        setGame(prev => ({ ...prev, ...newState, status: 'idle' }));
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(newState));
+  const manualSetLevel = () => {
+      const input = prompt("MANUAL OVERRIDE: Enter Level (1-99)", game.currentLevel.toString());
+      if (input) {
+          const lvl = parseInt(input);
+          if (!isNaN(lvl) && lvl > 0 && lvl < 100) {
+              setGame(prev => ({ 
+                  ...prev, 
+                  currentLevel: lvl, 
+                  maxLevel: Math.max(prev.maxLevel, lvl),
+                  score: 0 
+              }));
+              localStorage.setItem(PERMANENT_KEY, JSON.stringify({
+                currentLevel: lvl,
+                maxLevel: Math.max(game.maxLevel, lvl),
+                stability: 50,
+                score: 0
+              }));
+          }
       }
+  };
+
+  const togglePracticeMode = () => {
+    playSound('lock', game.soundEnabled);
+    setGame(prev => ({ ...prev, isPracticeMode: !prev.isPracticeMode }));
   };
 
   const stopGame = () => {
@@ -323,12 +354,24 @@ export default function VectorFrameUnbreakable() {
       setGame(prev => ({ ...prev, status: 'gameover' }));
   };
 
+  const resetProgress = () => {
+    playSound('click', game.soundEnabled);
+    if (window.confirm("Reset all training progress to Level 1?")) {
+      const newState = {
+          currentLevel: 1,
+          maxLevel: game.maxLevel,
+          stability: 50,
+          score: 0
+      };
+      setGame(prev => ({ ...prev, ...newState, status: 'idle' }));
+      localStorage.setItem(PERMANENT_KEY, JSON.stringify(newState));
+    }
+  };
+
   // --- GAME LOOP ---
-  // We use a ref to track if we've handled the timeout to prevent double-firing
   const failureHandled = useRef(false);
 
   useEffect(() => {
-    // Reset the failure lock whenever we start playing
     if (game.status === 'playing') {
         failureHandled.current = false;
     }
@@ -337,12 +380,12 @@ export default function VectorFrameUnbreakable() {
   useEffect(() => {
     if (game.status !== 'playing') return;
     
+    // Timer doesn't matter as much in practice mode, but keeps pressure on
     const decay = 0.25 + (game.currentLevel * 0.04); 
     
     const interval = setInterval(() => {
       setTimer(prev => {
         if (prev <= 0) {
-          // Guard clause to prevent race conditions
           if (!failureHandled.current) {
              failureHandled.current = true;
              handleFailure(); 
@@ -362,16 +405,20 @@ export default function VectorFrameUnbreakable() {
     const timeBonus = Math.floor(timer);
     const points = (100 + timeBonus) * game.multiplier + (game.currentLevel * 50);
 
-    const stabilityGain = 15; 
+    // PRACTICE MODE LOGIC: Freeze stability
+    const stabilityGain = game.isPracticeMode ? 0 : 15; 
     let newStability = game.stability + stabilityGain;
     
     let nextLevel = game.currentLevel;
     let nextStatus: GameState['status'] = 'playing';
 
-    if (newStability >= 100) {
+    // Only advance level if NOT in practice mode
+    if (!game.isPracticeMode && newStability >= 100) {
         nextLevel++;
         newStability = 50; 
         nextStatus = 'level_up';
+    } else if (newStability > 100) {
+        newStability = 100; // Cap stability
     }
 
     setGame(prev => ({
@@ -384,19 +431,16 @@ export default function VectorFrameUnbreakable() {
     }));
 
     setTimeout(() => {
-        // FIX 4: ORDER OF OPERATIONS - Generate Level BEFORE playing
         if (nextStatus === 'level_up') {
             setGame(prev => ({ ...prev, status: 'level_up', currentLevel: nextLevel, maxLevel: Math.max(prev.maxLevel, nextLevel) }));
             setTimeout(() => {
                 generateLevel(nextLevel);
-                // Short delay to ensure state propagates
                 requestAnimationFrame(() => {
                     setGame(prev => ({ ...prev, status: 'playing' }));
                 });
             }, 1200);
         } else {
             generateLevel(nextLevel);
-            // Short delay
             requestAnimationFrame(() => {
                 setGame(prev => ({ ...prev, status: 'playing', currentLevel: nextLevel, maxLevel: Math.max(prev.maxLevel, nextLevel) }));
             });
@@ -406,13 +450,16 @@ export default function VectorFrameUnbreakable() {
 
   const handleFailure = () => {
     playSound('fail', game.soundEnabled);
-    const stabilityLoss = 30; 
+    
+    // PRACTICE MODE LOGIC: Freeze stability
+    const stabilityLoss = game.isPracticeMode ? 0 : 30; 
     let newStability = game.stability - stabilityLoss;
     
     let nextLevel = game.currentLevel;
     let nextStatus: GameState['status'] = 'playing';
 
-    if (newStability <= 0) {
+    // Only drop level if NOT in practice mode
+    if (!game.isPracticeMode && newStability <= 0) {
         if (game.currentLevel > 1) {
             nextLevel--;
             newStability = 50;
@@ -420,32 +467,29 @@ export default function VectorFrameUnbreakable() {
         } else {
             newStability = 20; 
         }
+    } else if (newStability < 0) {
+        newStability = 0;
     }
 
     setGame(prev => ({
         ...prev, 
-        status: 'success_anim', // Pauses timer effect
-        multiplier: 1, streak: 0, stability: Math.max(0, newStability)
+        status: 'success_anim', 
+        multiplier: 1, streak: 0, stability: newStability
     }));
 
     setTimeout(() => {
-        // FIX 4: ORDER OF OPERATIONS
-        // 1. Show intermediate status (level down) if needed
         if (nextStatus === 'level_down') {
             setGame(prev => ({ ...prev, status: 'level_down', currentLevel: nextLevel }));
             setTimeout(() => {
-                // 2. Generate data for new level (resets timer to 100)
                 generateLevel(nextLevel);
-                // 3. Start Playing
                 requestAnimationFrame(() => {
                    setGame(prev => ({ ...prev, status: 'playing', stability: 50 }));
                 });
             }, 1200);
         } else {
-            // Immediate restart
             generateLevel(nextLevel);
             requestAnimationFrame(() => {
-                setGame(prev => ({ ...prev, status: 'playing', currentLevel: nextLevel, stability: newStability <= 0 ? 50 : newStability }));
+                setGame(prev => ({ ...prev, status: 'playing', currentLevel: nextLevel, stability: newStability }));
             });
         }
     }, 500);
@@ -483,7 +527,7 @@ export default function VectorFrameUnbreakable() {
       padding: '10px',
       background: 'rgba(255,255,255,0.02)', 
       borderRadius: '12px', 
-      border: `1px solid ${COLORS.gridBorder}`,
+      border: `1px solid ${game.isPracticeMode ? COLORS.practice : COLORS.gridBorder}`,
       boxShadow: '0 0 30px rgba(0,0,0,0.5)',
       position: 'relative' as const
     },
@@ -512,8 +556,9 @@ export default function VectorFrameUnbreakable() {
             <div style={{display:'flex', alignItems:'center', gap: 6, fontSize: '10px', color: COLORS.muted, letterSpacing: '1px'}}>
                 <BrainCircuit size={12} /> PROTOCOL LEVEL
             </div>
-            <div style={{fontSize: '28px', fontWeight: 900, color: '#fff', lineHeight: '1'}}>
+            <div style={{fontSize: '28px', fontWeight: 900, color: game.isPracticeMode ? COLORS.practice : '#fff', lineHeight: '1', display: 'flex', alignItems:'center', gap: 10}}>
                 {game.currentLevel}
+                {game.isPracticeMode && <span style={{fontSize: '12px', color: COLORS.practice, border: `1px solid ${COLORS.practice}`, padding: '2px 6px', borderRadius: 4}}>PRACTICE</span>}
                 {isBlindLevel && <span style={{fontSize: '12px', color: COLORS.inverted, marginLeft: 8}}><EyeOff size={12} style={{display:'inline'}}/> BLIND</span>}
             </div>
         </div>
@@ -523,9 +568,10 @@ export default function VectorFrameUnbreakable() {
         </div>
       </div>
 
-      {/* STABILITY METER + RESET CONTROL */}
+      {/* STABILITY METER + CONTROLS */}
       <div style={{ width: '100%', maxWidth: '440px', marginBottom: '24px', zIndex: 10, display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div style={{flex: 1, height: '6px', background: '#222', borderRadius: '3px', overflow: 'hidden'}}>
+          {/* Stability Bar (Disabled visual in practice mode) */}
+          <div style={{flex: 1, height: '6px', background: '#222', borderRadius: '3px', overflow: 'hidden', opacity: game.isPracticeMode ? 0.3 : 1}}>
               <motion.div 
                 animate={{ width: `${game.stability}%`, backgroundColor: game.stability > 50 ? COLORS.anchor : COLORS.inverted }}
                 transition={{ duration: 0.5 }}
@@ -533,28 +579,44 @@ export default function VectorFrameUnbreakable() {
               />
           </div>
           
+           {/* PRACTICE TOGGLE */}
+           <button 
+              onClick={togglePracticeMode}
+              title={game.isPracticeMode ? "Resume Progression" : "Freeze Level (Practice)"}
+              style={{
+                  background: 'transparent', 
+                  border: `1px solid ${game.isPracticeMode ? COLORS.practice : '#444'}`, 
+                  color: game.isPracticeMode ? COLORS.practice : '#fff',
+                  width: 32, height: 32, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  cursor: 'pointer', transition: 'all 0.2s'
+              }}
+           >
+              {game.isPracticeMode ? <Lock size={16} /> : <Unlock size={16} />}
+           </button>
+
+           {/* STOP BUTTON */}
            <button 
               onClick={stopGame}
-              title="End Session (Saves Progress)"
+              title="End Session"
               disabled={game.status !== 'playing'}
               style={{
-                  background: 'transparent', border: '1px solid #333', color: game.status === 'playing' ? '#fff' : '#333',
+                  background: 'transparent', border: '1px solid #444', color: '#fff',
                   width: 32, height: 32, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  cursor: game.status === 'playing' ? 'pointer' : 'default',
+                  cursor: game.status === 'playing' ? 'pointer' : 'default', opacity: game.status === 'playing' ? 1 : 0.5,
                   transition: 'all 0.2s'
               }}
            >
               <StopCircle size={16} />
            </button>
 
-          <button 
+           {/* RESET BUTTON */}
+           <button 
               onClick={resetProgress}
-              title="Reset Level"
+              title="Reset All Progress"
               style={{
-                  background: 'transparent', border: '1px solid #333', color: '#fff',
+                  background: 'transparent', border: '1px solid #444', color: '#fff',
                   width: 32, height: 32, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s'
+                  cursor: 'pointer', transition: 'all 0.2s'
               }}
            >
               <RotateCcw size={16} />
@@ -666,8 +728,10 @@ export default function VectorFrameUnbreakable() {
                 <p style={{color: '#666', fontSize: '12px', letterSpacing: '2px', marginBottom: 24}}>RFT PROTOCOL // PERSISTENT STATE</p>
                 
                 <div style={{display: 'flex', gap: 32, marginBottom: 48, color: '#888', fontSize: '12px'}}>
-                    <div style={{textAlign:'center'}}>
-                        <div style={{fontSize: '24px', color: '#fff', fontWeight: 'bold'}}>{game.currentLevel}</div>
+                    <div style={{textAlign:'center', cursor: 'pointer'}} onClick={manualSetLevel} title="Click to Manually Set Level">
+                        <div style={{fontSize: '24px', color: '#fff', fontWeight: 'bold', display:'flex', alignItems:'center', gap: 8}}>
+                            {game.currentLevel} <Edit3 size={14} color="#555"/>
+                        </div>
                         <div>CURRENT LVL</div>
                     </div>
                     <div style={{textAlign:'center'}}>
@@ -680,11 +744,6 @@ export default function VectorFrameUnbreakable() {
                     <button onClick={startGame} style={{background: COLORS.anchor, border: 'none', padding: '16px 48px', fontWeight: 'bold', cursor: 'pointer'}}>
                         {game.currentLevel > 1 ? 'RESUME PROTOCOL' : 'INITIATE'}
                     </button>
-                    {game.currentLevel > 1 && (
-                        <button onClick={resetProgress} style={{background: 'transparent', border: '1px solid #333', color: '#666', padding: '8px', fontSize: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent:'center', gap: 6}}>
-                           <RotateCcw size={10} /> RESET ALL PROGRESS
-                        </button>
-                    )}
                 </div>
             </motion.div>
         )}
