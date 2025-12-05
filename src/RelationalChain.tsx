@@ -4,7 +4,7 @@ import {
   BrainCircuit, Crosshair, 
   TrendingUp, AlertTriangle, EyeOff, 
   RotateCcw, Save, StopCircle, ArrowUp,
-  Edit3, Lock, Unlock, BarChart2, Target,
+  Edit3, Lock, Unlock, BarChart2,
   Activity
 } from 'lucide-react';
 
