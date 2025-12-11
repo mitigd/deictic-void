@@ -843,7 +843,9 @@ export default function VectorFramePersistent() {
                             animate={{ rotate: anchorRotation, opacity: (isBlindLevel && game.status === 'playing') ? 0 : 1 }}
                             transition={{ 
                                 rotate: { type: 'spring', stiffness: 200, damping: 20 },
-                                opacity: { duration: 0.5, delay: 0.5 } 
+                                opacity: (isBlindLevel && game.status === 'playing') 
+                                    ? { duration: 0.5, delay: 1.5 } 
+                                    : { duration: 0 }
                             }}
                             style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}
                         >
